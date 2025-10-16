@@ -1,4 +1,4 @@
-FROM rust:1.80 as builder
+FROM rust:1.80 AS builder
 WORKDIR /workspace
 RUN rustup target add wasm32-wasip1
 ARG PLUGIN_NAME="say-hello"
