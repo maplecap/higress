@@ -7,7 +7,8 @@ use http::Method;
 use multimap::MultiMap;
 use proxy_wasm::traits::{Context, HttpContext, RootContext};
 use proxy_wasm::types::{Bytes, ContextType, DataAction, HeaderAction, LogLevel};
-use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
+use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
 use std::any::Any;
 use std::cell::RefCell;
@@ -76,22 +77,67 @@ fn default_pilot_path() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-enum XValue {
+#[serde(untagged)]
+enum RuleValue {
     Str(String),
     Set(HashMap<String, ()>),
 }
 
-impl Default for XValue {
+impl Default for RuleValue {
     fn default() -> Self {
-        XValue::Str(String::new())
+        RuleValue::Str(String::new())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+enum Operator {
+    In,
+    NotIn,
+    Equal,
+    NotEqual,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Contains,
+    NotContains,
+    Regexp,
+}
+
+impl Default for Operator {
+    fn default() -> Self {
+        Operator::In
     }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 struct RuleItem {
     key: String,
-    operator: String,
-    value: XValue,
+    operator: Operator,
+    #[serde(deserialize_with = "deserialize_rule_value")]
+    value: RuleValue,
+}
+
+fn deserialize_rule_value<'de, D>(deserializer: D) -> Result<RuleValue, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::String(s) => Ok(RuleValue::Str(s)),
+        Value::Array(arr) => {
+            let mut set = HashMap::new();
+            for item in arr {
+                if let Value::String(s) = item {
+                    set.insert(s, ());
+                } else {
+                    return Err(de::Error::custom("rule_value expected string in array"));
+                }
+            }
+            Ok(RuleValue::Set(set))
+        }
+        _ => Err(de::Error::custom("rule_value unexpected value type")),
+    }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -114,14 +160,37 @@ struct TokenPreludeConfig {
     version: String,
     need_prelude_headers: Vec<Header>,
     forbid_prelude_headers: Vec<Header>,
-    support_models: Option<Vec<String>>,
-    support_models_map: HashMap<String, ()>,
+    // support_models: Option<Vec<String>>,
+    // support_models_map: HashMap<String, ()>,
+    #[serde(deserialize_with = "deserialize_support_models")]
+    support_models: HashMap<String, ()>,
     token_high_threshold: HashMap<String, f64>,
     token_low_threshold: HashMap<String, f64>,
     token_prelude_coefficient: HashMap<String, f64>,
     whitelist_prelude_headers: Vec<Header>,
     pilot_service: PilotConfig,
     complex_rules: Vec<ComplexRule>,
+}
+
+fn deserialize_support_models<'de, D>(deserializer: D) -> Result<HashMap<String, ()>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::Array(arr) => {
+            let mut set = HashMap::new();
+            for item in arr {
+                if let Value::String(s) = item {
+                    set.insert(s, ());
+                } else {
+                    return Err(de::Error::custom("support_models expected string in array"));
+                }
+            }
+            Ok(set)
+        }
+        _ => Err(de::Error::custom("support_models unexpected value type")),
+    }
 }
 
 fn default_version() -> String {
@@ -584,8 +653,9 @@ impl TokenPrelude {
     }
 
     fn support_prelude(&mut self, config: &TokenPreludeConfig, model: &str) -> bool {
-        config.support_models_map.contains_key(model)
+        // config.support_models_map.contains_key(model)
         // config.support_models_to_map().contains_key(model)
+        config.support_models.contains_key(model)
     }
 
     fn in_prelude_whitelist(
@@ -669,26 +739,32 @@ impl Context for TokenPreludeRoot {}
 impl RootContext for TokenPreludeRoot {
     fn on_configure(&mut self, _plugin_configuration_size: usize) -> bool {
         self.log.info("TokenPreludeRoot::on_configure");
-        if on_configure(
+        on_configure(
             self,
             _plugin_configuration_size,
             self.rule_matcher.borrow_mut().deref_mut(),
             &self.log,
-        ) {
-            self.rule_matcher
-                .borrow_mut()
-                .rewrite_config(|c| TokenPreludeConfig {
-                    support_models_map: c
-                        .support_models
-                        .as_ref()
-                        .unwrap_or(&Vec::new())
-                        .iter()
-                        .map(|m| (m.clone(), ()))
-                        .collect(),
-                    ..c.clone()
-                });
-        }
-        true
+        )
+        // if on_configure(
+        //     self,
+        //     _plugin_configuration_size,
+        //     self.rule_matcher.borrow_mut().deref_mut(),
+        //     &self.log,
+        // ) {
+        //     self.rule_matcher
+        //         .borrow_mut()
+        //         .rewrite_config(|c| TokenPreludeConfig {
+        //             support_models_map: c
+        //                 .support_models
+        //                 .as_ref()
+        //                 .unwrap_or(&Vec::new())
+        //                 .iter()
+        //                 .map(|m| (m.clone(), ()))
+        //                 .collect(),
+        //             ..c.clone()
+        //         });
+        // }
+        // true
     }
     fn create_http_context(&self, context_id: u32) -> Option<Box<dyn HttpContext>> {
         self.log.info(&format!(
