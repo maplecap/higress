@@ -7,6 +7,7 @@ use http::Method;
 use multimap::MultiMap;
 use proxy_wasm::traits::{Context, HttpContext, RootContext};
 use proxy_wasm::types::{Bytes, ContextType, DataAction, HeaderAction, LogLevel};
+use regex::Regex;
 use serde::de::Deserializer;
 use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
@@ -217,7 +218,7 @@ impl Display for TokenPreludeConfig {
 //     }
 // }
 
-fn format_body(body: Option<Vec<u8>>) -> String {
+fn _format_body(body: Option<Vec<u8>>) -> String {
     if let Some(bd) = &body {
         if let Ok(b) = std::str::from_utf8(bd) {
             return b.to_string();
@@ -249,6 +250,7 @@ impl HttpContextWrapper<TokenPreludeConfig> for TokenPrelude {
         &self.log
     }
     fn on_config(&mut self, config: Rc<TokenPreludeConfig>) {
+        self.log.debug(&format!("context_id: {}", self.cid));
         self.log.info(&format!("on_config: {}", config));
         self.config = Some(config.clone());
     }
@@ -270,25 +272,35 @@ impl HttpContextWrapper<TokenPreludeConfig> for TokenPrelude {
             return HeaderAction::Continue;
         }
 
-        if !self.need_prelude(&config.clone(), headers) {
-            return HeaderAction::Continue;
+        let new_version = "v2".to_string();
+        if config.version.eq(&new_version) {
+            if !self.hit_prelude_rule(&config, headers) || !request_wrapper::has_request_body() {
+                return HeaderAction::Continue;
+            }
+            self.set_context(NEED_TOKEN_PRELUDE_CTX, Box::new(true));
+
+            HeaderAction::StopIteration
+        } else {
+            if !self.need_prelude(&config.clone(), headers) {
+                return HeaderAction::Continue;
+            }
+
+            if self.forbid_prelude(&config.clone(), headers) {
+                return HeaderAction::Continue;
+            }
+
+            if self.in_prelude_whitelist(&config.clone(), headers) {
+                return HeaderAction::Continue;
+            }
+
+            if !request_wrapper::has_request_body() {
+                return HeaderAction::Continue;
+            }
+
+            self.set_context(NEED_TOKEN_PRELUDE_CTX, Box::new(true));
+
+            HeaderAction::StopIteration
         }
-
-        if self.forbid_prelude(&config.clone(), headers) {
-            return HeaderAction::Continue;
-        }
-
-        if self.in_prelude_whitelist(&config.clone(), headers) {
-            return HeaderAction::Continue;
-        }
-
-        if !request_wrapper::has_request_body() {
-            return HeaderAction::Continue;
-        }
-
-        self.set_context(NEED_TOKEN_PRELUDE_CTX, Box::new(true));
-
-        HeaderAction::StopIteration
     }
     fn on_http_response_complete_headers(
         &mut self,
@@ -311,6 +323,10 @@ impl HttpContextWrapper<TokenPreludeConfig> for TokenPrelude {
         };
 
         if !config.active {
+            return HeaderAction::Continue;
+        }
+
+        if !self.get_bool_context(NEED_TOKEN_PRELUDE_CTX) {
             return HeaderAction::Continue;
         }
 
@@ -360,8 +376,7 @@ impl HttpContextWrapper<TokenPreludeConfig> for TokenPrelude {
         }
 
         let model = {
-            let v: serde_json::Value =
-                serde_json::from_slice(req_body).unwrap_or(serde_json::Value::Null);
+            let v: Value = serde_json::from_slice(req_body).unwrap_or(Value::Null);
             v.get("model")
                 .and_then(|m| m.as_str())
                 .unwrap_or("")
@@ -716,6 +731,121 @@ impl TokenPrelude {
         }
         false
     }
+
+    #[allow(dead_code)]
+    fn hit_prelude_rule(
+        &self,
+        config: &TokenPreludeConfig,
+        headers: &MultiMap<String, String>,
+    ) -> bool {
+        let mut hit = false;
+        let rules = config.complex_rules.clone();
+
+        for cr in &rules {
+            let item_num = cr.rule_items.len();
+            let mut match_num = 0;
+            for r in &cr.rule_items {
+                if !self.match_header_rule(headers, &r.key, &r.value, &r.operator) {
+                    break;
+                }
+                match_num += 1;
+            }
+            if match_num == item_num {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    }
+
+    fn match_header_rule(
+        &self,
+        headers: &MultiMap<String, String>,
+        rule_k: &str,
+        rule_v: &RuleValue,
+        operator: &Operator,
+    ) -> bool {
+        let Some(real_v) = headers.get(rule_k) else {
+            return false;
+        };
+
+        match operator {
+            Operator::In => match rule_v {
+                RuleValue::Set(set) => set.contains_key(real_v),
+                _ => false,
+            },
+            Operator::NotIn => match rule_v {
+                RuleValue::Set(set) => !set.contains_key(real_v),
+                _ => false,
+            },
+            Operator::Equal => match rule_v {
+                RuleValue::Str(s) => s.eq(real_v),
+                _ => false,
+            },
+            Operator::NotEqual => match rule_v {
+                RuleValue::Str(s) => !s.eq(real_v),
+                _ => false,
+            },
+            Operator::Gt => match rule_v {
+                RuleValue::Str(s) => match s.parse::<f64>() {
+                    Ok(x) => match real_v.parse::<f64>() {
+                        Ok(y) => y.gt(&x),
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                },
+                _ => false,
+            },
+            Operator::Ge => match rule_v {
+                RuleValue::Str(s) => match s.parse::<f64>() {
+                    Ok(x) => match real_v.parse::<f64>() {
+                        Ok(y) => y.ge(&x),
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                },
+                _ => false,
+            },
+            Operator::Lt => match rule_v {
+                RuleValue::Str(s) => match s.parse::<f64>() {
+                    Ok(x) => match real_v.parse::<f64>() {
+                        Ok(y) => y.lt(&x),
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                },
+                _ => false,
+            },
+            Operator::Le => match rule_v {
+                RuleValue::Str(s) => match s.parse::<f64>() {
+                    Ok(x) => match real_v.parse::<f64>() {
+                        Ok(y) => y.le(&x),
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                },
+                _ => false,
+            },
+            Operator::Contains => match rule_v {
+                RuleValue::Str(s) => real_v.contains(s),
+                _ => false,
+            },
+            Operator::NotContains => match rule_v {
+                RuleValue::Str(s) => !real_v.contains(s),
+                _ => false,
+            },
+            Operator::Regexp => match rule_v {
+                RuleValue::Str(s) => {
+                    let Ok(re) = Regex::new(s) else {
+                        return false;
+                    };
+
+                    re.is_match(real_v)
+                }
+                _ => false,
+            },
+        }
+    }
 }
 
 struct TokenPreludeRoot {
@@ -796,5 +926,25 @@ impl RootContextWrapper<TokenPreludeConfig> for TokenPreludeRoot {
             cid: context_id as i64,
             // cid: -1,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hit_prelude_rule() {
+        let t = TokenPrelude {
+            config: None,
+            log: Log::new(PLUGIN_NAME.to_string()),
+            weak: Weak::default(),
+            user_context: HashMap::default(),
+            cid: -1,
+        };
+
+        let c = TokenPreludeConfig::default();
+        let h = MultiMap::new();
+        assert_eq!(t.hit_prelude_rule(&c, &h), true);
     }
 }
