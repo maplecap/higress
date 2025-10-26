@@ -21,7 +21,7 @@ use std::string::ToString;
 use std::time::Duration;
 
 proxy_wasm::main! {{
-    proxy_wasm::set_log_level(LogLevel::Debug);
+    proxy_wasm::set_log_level(LogLevel::Info);
     proxy_wasm::set_root_context(|_|Box::new(TokenPreludeRoot::new()));
 }}
 
@@ -250,8 +250,8 @@ impl HttpContextWrapper<TokenPreludeConfig> for TokenPrelude {
         &self.log
     }
     fn on_config(&mut self, config: Rc<TokenPreludeConfig>) {
-        self.log.debug(&format!("context_id: {}", self.cid));
-        self.log.info(&format!("on_config: {}", config));
+        // self.log.debug(&format!("context_id: {}", self.cid));
+        // self.log.debug(&format!("on_config: {}", config));
         self.config = Some(config.clone());
     }
     fn on_http_request_complete_headers(

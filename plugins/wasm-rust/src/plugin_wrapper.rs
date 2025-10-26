@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -19,6 +20,7 @@ use std::time::Duration;
 
 use crate::cluster_wrapper::Cluster;
 use crate::log::Log;
+use crate::request_wrapper::{is_binary_request_body, is_websocket};
 use crate::rule_matcher::SharedRuleMatcher;
 use http::{method::Method, Uri};
 use lazy_static::lazy_static;
@@ -217,6 +219,9 @@ where
 downcast_rs::impl_downcast!(HttpContextWrapper<PluginConfig> where PluginConfig: Default + DeserializeOwned + Clone);
 
 pub struct PluginHttpWrapper<PluginConfig> {
+    need_request_body: bool,
+    need_response_body: bool,
+    user_context: HashMap<String, Box<dyn Any>>,
     req_body_len: usize,
     res_body_len: usize,
     config: Option<Rc<PluginConfig>>,
@@ -237,6 +242,9 @@ where
             .borrow_mut()
             .init_self_weak(Rc::downgrade(&rc_content));
         PluginHttpWrapper {
+            need_request_body: true,
+            need_response_body: true,
+            user_context: HashMap::new(),
             req_body_len: 0,
             res_body_len: 0,
             config: None,
@@ -247,6 +255,29 @@ where
 
     fn get_http_call_fn(&mut self, token_id: u32) -> Option<Box<HttpCallbackFn>> {
         HTTP_CALLBACK_DISPATCHER.with(|dispatcher| dispatcher.pop(token_id))
+    }
+
+    fn set_context(&mut self, key: &str, value: Box<dyn Any>) {
+        self.user_context.insert(key.to_string(), value);
+    }
+
+    fn get_bool_context(&self, key: &str) -> bool {
+        let Some(value) = self.user_context.get(key) else {
+            return false;
+        };
+        value.downcast_ref::<bool>().copied().unwrap_or(false)
+    }
+
+    fn get_string_context(&self, key: &str) -> &str {
+        let Some(value) = self.user_context.get(key) else {
+            return "";
+        };
+
+        let Some(s) = value.downcast_ref::<String>() else {
+            return "";
+        };
+
+        s.as_str()
     }
 }
 
@@ -367,6 +398,15 @@ where
             }
         }
 
+        if is_binary_request_body() {
+            self.need_request_body = false;
+        }
+
+        if is_websocket() {
+            self.need_request_body = false;
+            self.need_response_body = false;
+        }
+
         if let Some(config) = &self.config {
             self.http_content.borrow_mut().on_config(config.clone());
         }
@@ -386,6 +426,11 @@ where
         if self.config.is_none() {
             return DataAction::Continue;
         }
+
+        if !self.need_request_body {
+            return DataAction::Continue;
+        }
+
         if !self.http_content.borrow().cache_request_body() {
             return self
                 .http_content
@@ -456,6 +501,11 @@ where
         if self.config.is_none() {
             return DataAction::Continue;
         }
+
+        if !self.need_response_body {
+            return DataAction::Continue;
+        }
+
         if !self.http_content.borrow().cache_response_body() {
             return self
                 .http_content

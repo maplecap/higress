@@ -31,6 +31,22 @@ pub fn get_request_method() -> String {
     get_request_head(":method", "method")
 }
 
+pub fn is_websocket() -> bool {
+    let Some(connection) = internal::get_http_request_header("connection") else {
+        return false;
+    };
+
+    let Some(upgrade) = internal::get_http_request_header("upgrade") else {
+        return false;
+    };
+
+    if connection.eq_ignore_ascii_case("upgrade") && upgrade.eq_ignore_ascii_case("websocket") {
+        return true;
+    }
+
+    false
+}
+
 pub fn is_binary_request_body() -> bool {
     if let Some(content_type) = internal::get_http_request_header("content-type") {
         if content_type.contains("octet-stream") || content_type.contains("grpc") {
